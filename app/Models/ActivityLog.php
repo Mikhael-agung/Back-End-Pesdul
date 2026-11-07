@@ -2,14 +2,21 @@
 
 namespace App\Models;
 
+use App\Enums\StaffRole;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\MorphTo;
 
 class ActivityLog extends Model
 {
-    protected $fillable = ['user_id', 'action', 'subject_type', 'subject_id', 'metadata'];
-    protected $casts = ['metadata' => 'array'];
-    public function user(): BelongsTo { return $this->belongsTo(User::class); }
-    public function subject(): MorphTo { return $this->morphTo(); }
+    public const UPDATED_AT = null;
+
+    protected $fillable = ['role', 'action', 'target', 'detail'];
+
+    protected function casts(): array
+    {
+        return [
+            'role' => StaffRole::class,
+            'detail' => 'array',
+            'created_at' => 'datetime',
+        ];
+    }
 }

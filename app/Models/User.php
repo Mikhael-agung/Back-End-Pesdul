@@ -2,41 +2,40 @@
 
 namespace App\Models;
 
-// use Illuminate\Contracts\Auth\MustVerifyEmail;
-use Database\Factories\UserFactory;
-use Illuminate\Database\Eloquent\Attributes\Fillable;
-use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
-use Illuminate\Notifications\Notifiable;
+use Laravel\Sanctum\HasApiTokens;
 
-#[Fillable(['name', 'email', 'phone', 'password'])]
-#[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {
-    /** @use HasFactory<UserFactory> */
-    use HasFactory, Notifiable;
+    use HasApiTokens, HasFactory;
 
-    public function orders()
+    protected $fillable = ['name', 'identifier', 'password'];
+
+    protected $hidden = ['password'];
+
+    protected function casts(): array
+    {
+        return ['password' => 'hashed'];
+    }
+
+    public function orders(): HasMany
     {
         return $this->hasMany(Order::class);
     }
 
-    public function staffAccess()
+        /** Email jadi huruf kecil. Nomor HP jadi format 08xxxx (+62/62 diganti 0). */
+    public static function normalizeIdentifier(string $value): string
     {
-        return $this->hasOne(StaffAccess::class);
-    }
+        $v = strtolower(trim($value));
 
-    /**
-     * Get the attributes that should be cast.
-     *
-     * @return array<string, string>
-     */
-    protected function casts(): array
-    {
-        return [
-            'email_verified_at' => 'datetime',
-            'password' => 'hashed',
-        ];
+        if (str_contains($v, '@')) {
+            return $v;
+        }
+
+        $v = preg_replace('/[\s\-]/', '', $v);
+
+        return preg_replace('/^(\+62|62)/', '0', $v);
     }
 }

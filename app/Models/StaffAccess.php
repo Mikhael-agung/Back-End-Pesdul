@@ -4,12 +4,18 @@ namespace App\Models;
 
 use App\Enums\StaffRole;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Laravel\Sanctum\HasApiTokens;
 
 class StaffAccess extends Model
 {
-    protected $fillable = ['user_id', 'role', 'pin_hash', 'is_active'];
-    protected $casts = ['role' => StaffRole::class, 'is_active' => 'boolean'];
+    use HasApiTokens;
+
+    protected $fillable = ['role', 'pin_hash'];
+
     protected $hidden = ['pin_hash'];
-    public function user(): BelongsTo { return $this->belongsTo(User::class); }
+
+    protected function casts(): array
+    {
+        return ['role' => StaffRole::class];
+    }
 }

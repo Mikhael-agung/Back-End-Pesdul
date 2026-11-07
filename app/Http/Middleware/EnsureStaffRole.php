@@ -2,15 +2,32 @@
 
 namespace App\Http\Middleware;
 
+use App\Exceptions\BusinessException;
+use App\Models\StaffAccess;
+use App\Models\User;
 use Closure;
 use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\Response;
 
-class EnsureStaffRole
+/**
+ * Pemakaian: role:consumer  |  role:kasir,admin  |  role:kasir,dapur,admin
+ */
+class EnsureRole
 {
-    public function handle(Request $request, Closure $next, ...$roles)
+    public function handle(Request $request, Closure $next, string ...$roles): Response
     {
-        $role = $request->user()?->staffAccess?->role?->value;
-        abort_unless($role && in_array($role, $roles, true), 403, 'Akses staf tidak diizinkan.');
+        $actor = $request->user();
+
+        $allowed = match (true) {
+            $actor instanceof User => in_array('consumer', $roles, true),
+            $actor instanceof StaffAccess => in_array($actor->role->value, $roles, true),
+            default => false,
+        };
+
+        if (! $allowed) {
+            throw new BusinessException('Akses ditolak untuk role ini.', 'ROLE_FORBIDDEN', 403);
+        }
+
         return $next($request);
     }
 }

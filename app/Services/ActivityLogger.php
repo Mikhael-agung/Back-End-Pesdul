@@ -2,13 +2,18 @@
 
 namespace App\Services;
 
+use App\Enums\StaffRole;
 use App\Models\ActivityLog;
-use Illuminate\Database\Eloquent\Model;
 
 class ActivityLogger
 {
-    public function log(string $action, ?Model $subject = null, array $metadata = []): ActivityLog
+    public function log(StaffRole $role, string $action, ?string $target = null, ?array $detail = null): ActivityLog
     {
-        return ActivityLog::create(['user_id' => auth()->id(), 'action' => $action, 'subject_type' => $subject?->getMorphClass(), 'subject_id' => $subject?->getKey(), 'metadata' => $metadata]);
+        return ActivityLog::create([
+            'role' => $role->value,
+            'action' => $action,
+            'target' => $target,
+            'detail' => $detail,
+        ]);
     }
 }

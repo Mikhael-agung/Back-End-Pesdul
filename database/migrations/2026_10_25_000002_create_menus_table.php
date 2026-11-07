@@ -4,21 +4,24 @@ use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 
-return new class extends Migration {
+return new class extends Migration
+{
     public function up(): void
     {
         Schema::create('menus', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('menu_category_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('category_id')->constrained('menu_categories')->restrictOnDelete();
             $table->string('name');
-            $table->string('slug')->unique();
-            $table->text('description')->nullable();
             $table->unsignedInteger('price');
-            $table->string('image_path')->nullable();
+            $table->string('photo')->nullable();
+            $table->boolean('has_spice_level')->default(false);
             $table->boolean('is_active')->default(true);
             $table->timestamps();
         });
     }
 
-    public function down(): void { Schema::dropIfExists('menus'); }
+    public function down(): void
+    {
+        Schema::dropIfExists('menus');
+    }
 };

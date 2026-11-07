@@ -7,5 +7,8 @@ use Illuminate\Database\Seeder;
 
 class SettingSeeder extends Seeder
 {
-    public function run(): void { Setting::updateOrCreate(['key' => 'store_name'], ['value' => 'Pesduls']); }
+    public function run(): void
+    {
+        Setting::firstOrCreate(['key' => 'dine_in_full'], ['value' => '0']);
+    }
 }
