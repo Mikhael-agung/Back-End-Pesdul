@@ -12,7 +12,7 @@ use Symfony\Component\HttpFoundation\Response;
 /**
  * Pemakaian: role:consumer  |  role:kasir,admin  |  role:kasir,dapur,admin
  */
-class EnsureRole
+class EnsureStaffRole
 {
     public function handle(Request $request, Closure $next, string ...$roles): Response
     {

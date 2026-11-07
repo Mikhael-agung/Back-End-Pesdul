@@ -1,7 +1,7 @@
 <?php
 
 use App\Exceptions\BusinessException;
-use App\Http\Middleware\EnsureRole;
+use App\Http\Middleware\EnsureStaffRole;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -20,7 +20,7 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
-            'role' => EnsureRole::class,
+            'role' => EnsureStaffRole::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
