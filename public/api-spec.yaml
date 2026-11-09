@@ -1,0 +1,1115 @@
+openapi: 3.0.3
+info:
+  title: PESDUL'S (Pesan Dulu) API
+  version: 1.0.0
+  description: |
+    Backend REST API untuk PESDUL'S, mengacu PRD v1.0 (20 Okt 2026).
+    Backend: Laravel. Pembayaran: Midtrans sandbox (QRIS, Core API).
+
+    ## Konvensi
+    - Base path: `/api/v1`. Semua body dan response JSON, kecuali yang ditandai multipart.
+    - Nama field `snake_case`, path `kebab-case`, waktu ISO 8601 (zona Asia/Jakarta, `+07:00`).
+    - Sukses: `{ "data": ... }`. List ber-halaman: `{ "data": [...], "meta": {...} }`.
+    - Error: `{ "message": "...", "code": "KODE_ERROR", "errors": { "field": ["..."] } }`.
+    - Auth: header `Authorization: Bearer <token>` (Laravel Sanctum).
+      - `consumerAuth`: token dari login konsumen.
+      - `staffAuth`: token dari input PIN, membawa role `kasir`, `dapur`, atau `admin`.
+      Role salah menghasilkan 403 `ROLE_FORBIDDEN`. Semua aturan dijalankan di backend.
+
+    ## Status pesanan
+    | status | label | pengubah |
+    |---|---|---|
+    | `pending_payment` | Menunggu pembayaran | sistem |
+    | `paid` | Dibayar | sistem (notifikasi Midtrans / cek status) |
+    | `cooking` | Dimasak | kasir (scan) |
+    | `done` | Selesai | dapur |
+    | `picked_up` | Diambil | kasir |
+    | `expired` | Kedaluwarsa | sistem (15 menit tanpa bayar) |
+
+    ## Kode error bisnis
+    `VALIDATION_ERROR` (422), `UNAUTHENTICATED` (401), `ROLE_FORBIDDEN` (403), `NOT_FOUND` (404),
+    `STOCK_INSUFFICIENT` (409), `DINE_IN_FULL` (409), `TYPE_LOCKED` (409), `ORDER_NOT_PAYABLE` (409),
+    `ORDER_EXPIRED` (409), `QR_INVALID` (409, QR hangus / tidak dikenal), `QR_ALREADY_SCANNED` (409),
+    `ORDER_UNPAID` (409), `INVALID_STATUS_TRANSITION` (409), `STOCK_BELOW_SOLD` (422),
+    `CATEGORY_NOT_EMPTY` (409), `PIN_INVALID` (401), `TOO_MANY_ATTEMPTS` (429).
+
+    ## Catatan perilaku penting
+    - Keranjang disimpan di frontend. Backend memvalidasi lewat `POST /cart/validate` dan ulang saat `POST /orders`.
+    - Stok berkurang saat pembayaran berhasil (FR-26). Cek stok dilakukan saat checkout dalam transaksi DB.
+    - `estimate_minutes` = (jumlah pesanan `cooking` yang discan lebih dulu dan belum `done`) x 5. `null` sebelum discan. Dihitung ulang tiap request.
+    - `qr_token` hanya dikembalikan ke pemilik saat status `paid`. Ganti tipe membuat token baru, token lama langsung `QR_INVALID`.
+    - Polling frontend: dapur/kasir 5 dtk, QR pesanan 10 dtk, pembayaran 5 dtk. Endpoint polling dibuat ringan.
+    - Menu tidak dihapus permanen, hanya dinonaktifkan.
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Lokal
+tags:
+  - name: Konsumen - Auth
+  - name: Konsumen - Menu
+  - name: Konsumen - Pesanan
+  - name: Pembayaran
+  - name: Internal - Auth
+  - name: Kasir
+  - name: Dapur
+  - name: Admin - Menu
+  - name: Admin - Stok & Pengaturan
+  - name: Admin - Laporan & Log
+
+paths:
+  # ---------------- Konsumen: Auth (FR-01) ----------------
+  /auth/register:
+    post:
+      tags: [Konsumen - Auth]
+      summary: Daftar akun konsumen (K-01)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, identifier, password, password_confirmation]
+              properties:
+                name: { type: string, example: Agung }
+                identifier: { type: string, description: Email atau nomor HP, example: agung@mail.com }
+                password: { type: string, format: password, minLength: 8 }
+                password_confirmation: { type: string, format: password }
+      responses:
+        '201':
+          description: Terdaftar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '422': { $ref: '#/components/responses/Validation' }
+  /auth/login:
+    post:
+      tags: [Konsumen - Auth]
+      summary: Login konsumen
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identifier, password]
+              properties:
+                identifier: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Berhasil
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '422': { $ref: '#/components/responses/Validation' }
+  /auth/logout:
+    post:
+      tags: [Konsumen - Auth]
+      summary: Logout (cabut token)
+      security: [{ consumerAuth: [] }]
+      responses:
+        '204': { description: Berhasil }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+  /auth/me:
+    get:
+      tags: [Konsumen - Auth]
+      summary: Profil konsumen saat ini
+      security: [{ consumerAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  # ---------------- Konsumen: Menu (FR-02, FR-03, FR-31, FR-32) ----------------
+  /categories:
+    get:
+      tags: [Konsumen - Menu]
+      summary: Daftar kategori menu
+      security: [{ consumerAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Category' }
+  /menus:
+    get:
+      tags: [Konsumen - Menu]
+      summary: Daftar menu aktif beserta stok hari ini (K-02)
+      description: Hanya menu aktif. Stok 0 ditandai `is_available=false` (label Habis). Foto kosong memakai `image_url` gambar default.
+      security: [{ consumerAuth: [] }]
+      parameters:
+        - { name: category_id, in: query, schema: { type: integer } }
+        - { name: q, in: query, description: Cari nama menu, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Menu' }
+  /settings/public:
+    get:
+      tags: [Konsumen - Menu]
+      summary: Pengaturan publik (penanda makan di tempat penuh)
+      security: [{ consumerAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      dine_in_full: { type: boolean }
+  /cart/validate:
+    post:
+      tags: [Konsumen - Menu]
+      summary: Validasi isi keranjang terhadap stok dan harga terkini (K-03)
+      security: [{ consumerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items: { $ref: '#/components/schemas/CartItemInput' }
+      responses:
+        '200':
+          description: Hasil validasi per item
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      valid: { type: boolean }
+                      total: { type: integer, example: 45000 }
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            menu_id: { type: integer }
+                            unit_price: { type: integer }
+                            qty: { type: integer }
+                            available: { type: boolean }
+                            stock_remaining: { type: integer }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  # ---------------- Konsumen: Pesanan (FR-04..FR-10, FR-29) ----------------
+  /orders:
+    post:
+      tags: [Konsumen - Pesanan]
+      summary: Buat pesanan dan tagihan QRIS (K-05)
+      description: |
+        Cek ulang stok dalam transaksi DB. Membuat pesanan `pending_payment`, kedaluwarsa 15 menit,
+        dan membuat charge QRIS Midtrans sandbox. `dine_in` ditolak `DINE_IN_FULL` bila penanda penuh aktif.
+      security: [{ consumerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_type, items]
+              properties:
+                order_type: { $ref: '#/components/schemas/OrderType' }
+                items:
+                  type: array
+                  minItems: 1
+                  items: { $ref: '#/components/schemas/CartItemInput' }
+      responses:
+        '201':
+          description: Pesanan dibuat
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Order' }
+        '409':
+          description: '`STOCK_INSUFFICIENT` (sertakan daftar menu bermasalah di `errors`) atau `DINE_IN_FULL`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/Validation' }
+    get:
+      tags: [Konsumen - Pesanan]
+      summary: Riwayat pesanan konsumen (K-08)
+      security: [{ consumerAuth: [] }]
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: per_page, in: query, schema: { type: integer, default: 10, maximum: 50 } }
+      responses:
+        '200':
+          description: OK, terbaru dulu
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/OrderSummary' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+  /orders/{code}:
+    get:
+      tags: [Konsumen - Pesanan]
+      summary: Detail dan status pesanan (K-07, polling 10 dtk)
+      description: Berisi `qr_token` (saat `paid`), `estimate_minutes`, dan `type_logs`. Hanya pemilik pesanan.
+      security: [{ consumerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/OrderCode' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Order' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /orders/{code}/type:
+    patch:
+      tags: [Konsumen - Pesanan]
+      summary: Ganti tipe pesanan (FR-08)
+      description: |
+        Hanya saat status `paid`. Membuat `qr_token` baru, token lama hangus, dan menulis `order_type_logs`.
+        Ke `dine_in` ditolak `DINE_IN_FULL` saat penuh (ke `takeaway` selalu boleh).
+        Status `cooking` ke atas ditolak `TYPE_LOCKED`.
+      security: [{ consumerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/OrderCode' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_type]
+              properties:
+                order_type: { $ref: '#/components/schemas/OrderType' }
+      responses:
+        '200':
+          description: Tipe diganti, `qr_token` baru ada di response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Order' }
+        '409':
+          description: '`TYPE_LOCKED`, `DINE_IN_FULL`, atau `ORDER_NOT_PAYABLE`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  # ---------------- Pembayaran (FR-06, FR-07, FR-27) ----------------
+  /orders/{code}/payment/status:
+    get:
+      tags: [Pembayaran]
+      summary: Cek status pembayaran (tombol Cek status, polling 5 dtk)
+      description: Memeriksa ulang ke Midtrans. Bila `settlement`, pesanan jadi `paid`, stok berkurang, QR terbit (idempoten).
+      security: [{ consumerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/OrderCode' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      order_status: { $ref: '#/components/schemas/OrderStatus' }
+                      payment: { $ref: '#/components/schemas/Payment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /orders/{code}/payment/retry:
+    post:
+      tags: [Pembayaran]
+      summary: Buat ulang tagihan QRIS (tombol coba lagi)
+      description: Hanya bila pesanan masih `pending_payment` dan belum lewat 15 menit, pembayaran sebelumnya gagal. Pesanan kedaluwarsa menghasilkan `ORDER_EXPIRED`.
+      security: [{ consumerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/OrderCode' }]
+      responses:
+        '200':
+          description: Tagihan baru
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Order' }
+        '409':
+          description: '`ORDER_EXPIRED` atau `ORDER_NOT_PAYABLE`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /payments/midtrans/notification:
+    post:
+      tags: [Pembayaran]
+      summary: Webhook notifikasi Midtrans (publik)
+      description: |
+        Tanpa auth Bearer. Verifikasi `signature_key` = SHA512(order_id + status_code + gross_amount + ServerKey).
+        Signature salah dijawab 403. Idempoten. Selalu balas 200 untuk notifikasi valid.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                order_id: { type: string }
+                transaction_id: { type: string }
+                transaction_status: { type: string, example: settlement }
+                fraud_status: { type: string }
+                status_code: { type: string, example: '200' }
+                gross_amount: { type: string, example: '45000.00' }
+                signature_key: { type: string }
+      responses:
+        '200': { description: Diterima }
+        '403': { description: Signature tidak valid }
+
+  # ---------------- Internal: Auth PIN (FR-11, FR-17, FR-20) ----------------
+  /internal/auth/pin:
+    post:
+      tags: [Internal - Auth]
+      summary: Masuk dengan PIN (I-01)
+      description: PIN divalidasi di backend terhadap hash. Rate limit 5 percobaan/menit per IP, lalu 429 dengan `retry_after`. Login dicatat di log aktivitas.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin]
+              properties:
+                pin: { type: string, pattern: '^[0-9]{4,8}$', example: '123456' }
+      responses:
+        '200':
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      role: { $ref: '#/components/schemas/StaffRole' }
+                      token: { type: string }
+        '401': { description: '`PIN_INVALID`', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '429': { $ref: '#/components/responses/TooMany' }
+  /internal/auth/logout:
+    post:
+      tags: [Internal - Auth]
+      summary: Keluar (cabut token staf)
+      security: [{ staffAuth: [] }]
+      responses:
+        '204': { description: Berhasil }
+
+  # ---------------- Kasir (FR-12..FR-16) ----------------
+  /internal/orders/lookup:
+    get:
+      tags: [Kasir]
+      summary: Pratinjau hasil scan sebelum konfirmasi (I-03)
+      description: Role `kasir`. Tidak mengubah status. Isi salah satu `qr_token` atau `code` (input manual, FR-13).
+      security: [{ staffAuth: [] }]
+      parameters:
+        - { name: qr_token, in: query, schema: { type: string } }
+        - { name: code, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Pesanan valid dan siap dikonfirmasi
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/StaffOrder' }
+        '409':
+          description: '`QR_INVALID`, `QR_ALREADY_SCANNED`, `ORDER_UNPAID`, atau `ORDER_EXPIRED`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /internal/orders/scan:
+    post:
+      tags: [Kasir]
+      summary: Konfirmasi scan, pesanan masuk dapur (FR-12, FR-13)
+      description: Role `kasir`. `paid` jadi `cooking`, tipe terkunci, pesanan masuk antrean dapur. Dicatat di log aktivitas.
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Isi salah satu.
+              properties:
+                qr_token: { type: string }
+                code: { type: string }
+      responses:
+        '200':
+          description: Diterima
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/StaffOrder' }
+        '409':
+          description: '`QR_INVALID`, `QR_ALREADY_SCANNED`, `ORDER_UNPAID`, atau `ORDER_EXPIRED`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /internal/cashier/board:
+    get:
+      tags: [Kasir]
+      summary: Dashboard kasir (I-02, polling 5 dtk)
+      description: Role `kasir` (admin boleh baca). `done` diurutkan terbaru di atas.
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      cooking:
+                        type: array
+                        items: { $ref: '#/components/schemas/StaffOrderSummary' }
+                      done:
+                        type: array
+                        items: { $ref: '#/components/schemas/StaffOrderSummary' }
+  /internal/orders/{code}:
+    get:
+      tags: [Kasir]
+      summary: Detail pesanan (FR-15)
+      description: Role `kasir`, `dapur`, atau `admin`.
+      security: [{ staffAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/OrderCode' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/StaffOrder' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /internal/orders/{code}/pickup:
+    post:
+      tags: [Kasir]
+      summary: Tandai Diambil (FR-16)
+      description: Role `kasir`. Hanya dari `done`, selain itu `INVALID_STATUS_TRANSITION`.
+      security: [{ staffAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/OrderCode' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/StaffOrder' }
+        '409': { description: '`INVALID_STATUS_TRANSITION`', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  # ---------------- Dapur (FR-17..FR-19) ----------------
+  /internal/kitchen/queue:
+    get:
+      tags: [Dapur]
+      summary: Antrean dapur (I-04, polling 5 dtk)
+      description: Role `dapur`. Pesanan `cooking`, urut waktu scan (terlama dulu).
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/KitchenCard' }
+  /internal/orders/{code}/complete:
+    post:
+      tags: [Dapur]
+      summary: Tekan Selesai (FR-19)
+      description: Role `dapur`. `cooking` jadi `done`. Estimasi pesanan di belakangnya otomatis berkurang saat dihitung ulang.
+      security: [{ staffAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/OrderCode' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/StaffOrder' }
+        '409': { description: '`INVALID_STATUS_TRANSITION`', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  # ---------------- Admin: Menu (FR-28, FR-31, FR-32) ----------------
+  /internal/categories:
+    get:
+      tags: [Admin - Menu]
+      summary: Daftar kategori
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Category' }
+    post:
+      tags: [Admin - Menu]
+      summary: Tambah kategori (role admin)
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '201':
+          description: Dibuat
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Category' }
+        '422': { $ref: '#/components/responses/Validation' }
+  /internal/categories/{id}:
+    patch:
+      tags: [Admin - Menu]
+      summary: Ubah nama kategori (role admin)
+      security: [{ staffAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Category' }
+    delete:
+      tags: [Admin - Menu]
+      summary: Hapus kategori (role admin)
+      description: Hanya kategori tanpa menu, selain itu `CATEGORY_NOT_EMPTY`.
+      security: [{ staffAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '204': { description: Dihapus }
+        '409': { description: '`CATEGORY_NOT_EMPTY`', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /internal/menus:
+    get:
+      tags: [Admin - Menu]
+      summary: Daftar semua menu termasuk nonaktif (I-07)
+      security: [{ staffAuth: [] }]
+      parameters:
+        - { name: category_id, in: query, schema: { type: integer } }
+        - { name: is_active, in: query, schema: { type: boolean } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/AdminMenu' }
+    post:
+      tags: [Admin - Menu]
+      summary: Tambah menu (role admin, multipart)
+      description: Foto opsional (jpg/png/webp, maks 2 MB). Tanpa foto, `image_url` memakai gambar default.
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/MenuForm' }
+      responses:
+        '201':
+          description: Dibuat, langsung muncul di Web Konsumen
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminMenu' }
+        '422': { $ref: '#/components/responses/Validation' }
+  /internal/menus/{id}:
+    post:
+      tags: [Admin - Menu]
+      summary: Ubah / nonaktifkan menu (role admin, multipart)
+      description: |
+        Kirim `POST` dengan field `_method=PATCH` (method spoofing Laravel, karena multipart).
+        Menonaktifkan = `is_active=false`. Tidak ada hapus permanen.
+      security: [{ staffAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/MenuForm'
+                - type: object
+                  properties:
+                    _method: { type: string, enum: [PATCH] }
+                    remove_photo: { type: boolean, description: Kembali ke gambar default }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminMenu' }
+        '422': { $ref: '#/components/responses/Validation' }
+
+  # ---------------- Admin: Stok & Pengaturan (FR-21..FR-23) ----------------
+  /internal/stocks:
+    get:
+      tags: [Admin - Stok & Pengaturan]
+      summary: Stok hari ini per menu (I-06)
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/StockRow' }
+    put:
+      tags: [Admin - Stok & Pengaturan]
+      summary: Simpan stok hari ini (role admin)
+      description: Boleh diperbarui berkali-kali di hari yang sama. Stok baru tidak boleh negatif dan tidak boleh kurang dari `sold`, selain itu `STOCK_BELOW_SOLD`. Stok 0 otomatis Habis.
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [menu_id, stock]
+                    properties:
+                      menu_id: { type: integer }
+                      stock: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: Tersimpan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/StockRow' }
+        '422': { description: '`VALIDATION_ERROR` atau `STOCK_BELOW_SOLD` (error per menu)', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /internal/settings/dine-in-full:
+    get:
+      tags: [Admin - Stok & Pengaturan]
+      summary: Status penanda makan di tempat penuh
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      enabled: { type: boolean }
+    put:
+      tags: [Admin - Stok & Pengaturan]
+      summary: Aktif/nonaktifkan penanda makan di tempat penuh (role admin)
+      description: Pesanan dine in yang sudah ada tetap berlaku dan masih bisa diganti ke takeaway.
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      enabled: { type: boolean }
+
+  # ---------------- Admin: Laporan & Log (FR-24, FR-30) ----------------
+  /internal/reports/revenue:
+    get:
+      tags: [Admin - Laporan & Log]
+      summary: Grafik pendapatan dan ringkasan (I-05)
+      description: Role `admin`. Pendapatan dihitung dari pesanan berstatus `paid`, `cooking`, `done`, `picked_up`.
+      security: [{ staffAuth: [] }]
+      parameters:
+        - { name: period, in: query, required: true, schema: { type: string, enum: [daily, weekly, monthly] } }
+        - { name: from, in: query, schema: { type: string, format: date }, description: Default 30 hari/12 minggu/12 bulan terakhir sesuai period }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: OK. Periode tanpa data mengembalikan `series` kosong.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      summary:
+                        type: object
+                        properties:
+                          total_revenue: { type: integer, example: 1250000 }
+                          total_orders: { type: integer, example: 48 }
+                      series:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            label: { type: string, example: '2026-10-25' }
+                            revenue: { type: integer }
+                            orders: { type: integer }
+        '422': { $ref: '#/components/responses/Validation' }
+  /internal/activity-logs:
+    get:
+      tags: [Admin - Laporan & Log]
+      summary: Log aktivitas, hanya baca (I-08)
+      description: Role `admin`. Tidak ada endpoint ubah/hapus.
+      security: [{ staffAuth: [] }]
+      parameters:
+        - { name: date_from, in: query, schema: { type: string, format: date } }
+        - { name: date_to, in: query, schema: { type: string, format: date } }
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/StaffRole' } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: per_page, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+      responses:
+        '200':
+          description: OK, terbaru dulu
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ActivityLog' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+
+components:
+  securitySchemes:
+    consumerAuth:
+      type: http
+      scheme: bearer
+      description: Token Sanctum dari /auth/login atau /auth/register
+    staffAuth:
+      type: http
+      scheme: bearer
+      description: Token dari /internal/auth/pin, membawa role
+
+  parameters:
+    OrderCode:
+      name: code
+      in: path
+      required: true
+      description: Kode pesanan
+      schema: { type: string, example: PSD-251025-0007 }
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+
+  responses:
+    Unauthenticated:
+      description: Belum login / token salah (`UNAUTHENTICATED`, `PIN_INVALID`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Tidak ditemukan (`NOT_FOUND`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Validation:
+      description: Validasi gagal (`VALIDATION_ERROR`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooMany:
+      description: Terlalu banyak percobaan (`TOO_MANY_ATTEMPTS`), lihat header `Retry-After`
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        message: { type: string }
+        code: { type: string, example: STOCK_INSUFFICIENT }
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+    PageMeta:
+      type: object
+      properties:
+        current_page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+        last_page: { type: integer }
+    OrderType:
+      type: string
+      enum: [dine_in, takeaway]
+    OrderStatus:
+      type: string
+      enum: [pending_payment, paid, cooking, done, picked_up, expired]
+    StaffRole:
+      type: string
+      enum: [kasir, dapur, admin]
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        identifier: { type: string }
+    AuthResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            user: { $ref: '#/components/schemas/User' }
+            token: { type: string }
+    Category:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string, example: Minuman }
+    Menu:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        price: { type: integer, example: 15000 }
+        image_url: { type: string, description: Foto menu atau gambar default }
+        category: { $ref: '#/components/schemas/Category' }
+        has_spice_level: { type: boolean }
+        spice_levels: { type: array, items: { type: integer }, example: [1, 2, 3], description: Kosong bila has_spice_level=false }
+        stock_remaining: { type: integer }
+        is_available: { type: boolean }
+    AdminMenu:
+      allOf:
+        - $ref: '#/components/schemas/Menu'
+        - type: object
+          properties:
+            is_active: { type: boolean }
+            has_photo: { type: boolean }
+    MenuForm:
+      type: object
+      required: [name, price, category_id]
+      properties:
+        name: { type: string }
+        price: { type: integer, minimum: 0 }
+        category_id: { type: integer }
+        is_active: { type: boolean, default: true }
+        has_spice_level: { type: boolean, default: false }
+        photo: { type: string, format: binary }
+    CartItemInput:
+      type: object
+      required: [menu_id, qty]
+      properties:
+        menu_id: { type: integer }
+        qty: { type: integer, minimum: 1 }
+        spice_level: { type: integer, nullable: true, minimum: 1, description: Wajib bila menu has_spice_level, ditolak bila tidak }
+        note: { type: string, nullable: true, maxLength: 200, example: tanpa pedas }
+    OrderItem:
+      type: object
+      properties:
+        menu_id: { type: integer }
+        name: { type: string }
+        qty: { type: integer }
+        unit_price: { type: integer }
+        spice_level: { type: integer, nullable: true }
+        note: { type: string, nullable: true }
+    TypeLog:
+      type: object
+      properties:
+        old_type: { $ref: '#/components/schemas/OrderType' }
+        new_type: { $ref: '#/components/schemas/OrderType' }
+        changed_at: { type: string, format: date-time }
+    Payment:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending, paid, failed, expired]
+        gross_amount: { type: integer }
+        qr_string: { type: string, description: Payload QRIS untuk dirender jadi QR }
+        qr_url: { type: string, nullable: true, description: URL gambar QRIS dari Midtrans }
+        expires_at: { type: string, format: date-time }
+    Order:
+      type: object
+      properties:
+        code: { type: string, example: PSD-251025-0007 }
+        order_type: { $ref: '#/components/schemas/OrderType' }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        status_label: { type: string, example: Dibayar }
+        total: { type: integer }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderItem' }
+        qr_token: { type: string, nullable: true, description: Hanya terisi saat status `paid` }
+        estimate_minutes: { type: integer, nullable: true, description: null sebelum discan kasir }
+        can_change_type: { type: boolean, description: true hanya saat `paid` }
+        type_logs:
+          type: array
+          items: { $ref: '#/components/schemas/TypeLog' }
+        payment: { $ref: '#/components/schemas/Payment' }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, description: Batas bayar (15 menit) }
+    OrderSummary:
+      type: object
+      properties:
+        code: { type: string }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        status_label: { type: string }
+        order_type: { $ref: '#/components/schemas/OrderType' }
+        total: { type: integer }
+        created_at: { type: string, format: date-time }
+    StaffOrderSummary:
+      type: object
+      properties:
+        code: { type: string }
+        customer_name: { type: string }
+        order_type: { $ref: '#/components/schemas/OrderType' }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        scanned_at: { type: string, format: date-time, nullable: true }
+        done_at: { type: string, format: date-time, nullable: true }
+    StaffOrder:
+      allOf:
+        - $ref: '#/components/schemas/StaffOrderSummary'
+        - type: object
+          properties:
+            total: { type: integer }
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/OrderItem' }
+    KitchenCard:
+      type: object
+      properties:
+        code: { type: string }
+        order_type: { $ref: '#/components/schemas/OrderType' }
+        scanned_at: { type: string, format: date-time }
+        items:
+          type: array
+          description: Memuat qty, spice_level, dan note per item
+          items: { $ref: '#/components/schemas/OrderItem' }
+    StockRow:
+      type: object
+      properties:
+        menu_id: { type: integer }
+        name: { type: string }
+        stock: { type: integer }
+        sold: { type: integer }
+        remaining: { type: integer }
+    ActivityLog:
+      type: object
+      properties:
+        id: { type: integer }
+        role: { $ref: '#/components/schemas/StaffRole' }
+        action:
+          type: string
+          enum: [login_pin, scan, complete, pickup, update_stock, update_menu, update_category, update_dine_in_full]
+        target: { type: string, nullable: true, example: PSD-251025-0007 }
+        detail: { type: object, nullable: true }
+        created_at: { type: string, format: date-time }
