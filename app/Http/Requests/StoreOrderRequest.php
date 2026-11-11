@@ -2,12 +2,25 @@
 
 namespace App\Http\Requests;
 
-use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Validation\Rule;
 use App\Enums\OrderType;
+use Illuminate\Validation\Rule;
 
-class StoreOrderRequest extends FormRequest
+class StoreOrderRequest extends CartValidateRequest
 {
-    public function authorize(): bool { return true; }
-    public function rules(): array { return ['order_type' => ['required', Rule::enum(OrderType::class)], 'items' => ['required','array','min:1'], 'items.*.menu_id' => ['required','exists:menus,id'], 'items.*.quantity' => ['required','integer','min:1']]; }
+    public function rules(): array
+    {
+        return array_merge(parent::rules(), [
+            'order_type' => ['required', Rule::enum(OrderType::class)],
+            'items.*.menu_id' => ['required', 'integer', 'exists:menus,id'],
+        ]);
+    }
+
+    public function messages(): array
+    {
+        return array_merge(parent::messages(), [
+            'order_type.required' => 'Tipe pesanan wajib dipilih.',
+            'order_type.enum' => 'Tipe pesanan tidak valid.',
+            'items.*.menu_id.exists' => 'Menu tidak ditemukan.',
+        ]);
+    }
 }
