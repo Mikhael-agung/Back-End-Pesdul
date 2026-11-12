@@ -4,14 +4,25 @@ namespace App\Http\Controllers\Api\V1\Consumer;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\CartValidateRequest;
-use App\Models\Menu;
+use App\Services\CartService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Arr;
 
 class CartController extends Controller
 {
-    public function validateCart(CartValidateRequest $request): JsonResponse
+    public function check(CartValidateRequest $request, CartService $cart): JsonResponse
     {
-        $total = collect($request->validated('items'))->sum(fn ($item) => Menu::findOrFail($item['menu_id'])->price * $item['quantity']);
-        return response()->json(['data' => ['subtotal' => $total, 'total' => $total]]);
+        $result = $cart->evaluate($request->validated('items'));
+
+        return response()->json([
+            'data' => [
+                'valid' => $result['valid'],
+                'total' => $result['total'],
+                'items' => array_map(
+                    fn (array $line) => Arr::only($line, ['menu_id', 'unit_price', 'qty', 'available', 'stock_remaining']),
+                    $result['lines'],
+                ),
+            ],
+        ]);
     }
 }

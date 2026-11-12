@@ -5,4 +5,5 @@ return [
     'client_key' => env('MIDTRANS_CLIENT_KEY'),
     'is_production' => (bool) env('MIDTRANS_IS_PRODUCTION', false),
     'expiry_minutes' => (int) env('MIDTRANS_EXPIRY_MINUTES', 15),
+    'acquirer' => 'gopay',
 ];

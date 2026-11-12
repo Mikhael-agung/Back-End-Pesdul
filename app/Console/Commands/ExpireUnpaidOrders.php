@@ -8,11 +8,15 @@ use Illuminate\Console\Command;
 class ExpireUnpaidOrders extends Command
 {
     protected $signature = 'orders:expire-unpaid';
-    protected $description = 'Expire unpaid orders past their payment deadline';
+
+    protected $description = 'Kedaluwarsakan pesanan yang belum dibayar melewati batas waktu';
 
     public function handle(OrderService $orders): int
     {
-        $this->info("Expired {$orders->expireUnpaid()} unpaid order(s).");
+        $count = $orders->expireOverdue();
+
+        $this->info("{$count} pesanan dikedaluwarsakan.");
+
         return self::SUCCESS;
     }
 }
