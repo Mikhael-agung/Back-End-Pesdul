@@ -8,6 +8,9 @@ use App\Http\Controllers\Api\V1\Internal\MenuAdminController;
 use App\Http\Controllers\Api\V1\Internal\PinAuthController;
 use App\Http\Controllers\Api\V1\Internal\SettingController;
 use App\Http\Controllers\Api\V1\Internal\StockController;
+use App\Http\Controllers\Api\V1\Consumer\OrderController;
+use App\Http\Controllers\Api\V1\Consumer\PaymentController;
+use App\Http\Controllers\Api\V1\Webhook\MidtransNotificationController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
@@ -24,8 +27,14 @@ Route::prefix('v1')->group(function () {
         Route::get('menus', [MenuController::class, 'index']);
         Route::get('settings/public', [MenuController::class, 'publicSettings']);
         Route::post('cart/validate', [CartController::class, 'check']);
-        // Part 4: orders, payment
+        Route::get('orders', [OrderController::class, 'index']);
+        Route::post('orders', [OrderController::class, 'store']);
+        Route::get('orders/{code}', [OrderController::class, 'show']);
+        Route::get('orders/{code}/payment/status', [PaymentController::class, 'status'])->middleware('throttle:30,1');
+        Route::post('orders/{code}/payment/retry', [PaymentController::class, 'retry'])->middleware('throttle:10,1');
     });
+
+    Route::post('payments/midtrans/notification', MidtransNotificationController::class);
 
     // ---------- Internal ----------
     Route::prefix('internal')->group(function () {

@@ -5,7 +5,7 @@ namespace App\Services;
 use App\Models\Menu;
 use Illuminate\Validation\ValidationException;
 
-class CartService
+class CartServices
 {
     /**
      * Hitung isi keranjang terhadap harga dan stok hari ini.
