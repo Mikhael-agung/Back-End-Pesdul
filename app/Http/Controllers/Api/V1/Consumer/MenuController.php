@@ -31,7 +31,7 @@ class MenuController extends Controller
             ->when($request->filled('q'), function ($q) use ($request) {
                 $term = addcslashes($request->string('q')->toString(), '%_\\');
 
-                $q->where('name', 'like', "%{$term}%");
+                $q->whereLike('name', "%{$term}%");
             })
             ->orderBy('category_id')
             ->orderBy('name')
