@@ -13,6 +13,7 @@ use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class OrderService
 {
@@ -213,6 +214,108 @@ class OrderService
 
         return $expired;
     }
+
+    public function changeType( Order $order, OrderType $type ): Order 
+    {
+        return DB::Transaction(function () use ($order, $type) {
+            $order = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
+
+            if(in_array($order->status,[OrderStatus::Cooking, OrderStatus::Done, OrderStatus::PickedUp], true)) {
+                throw new BusinessException('Pesanan sudah di-scan kasir, tidak bisa diubah.', 'TYPE_LOCKED');
+            }
+
+            if ($order->status !== OrderStatus::Paid) {
+                throw new BusinessException('Tipe hanya bisa diubah setelah pembayaran berhasil.', 'ORDER_NOT_PAYABLE');
+            }
+
+            if ($order->order_type === $type) {
+                throw ValidationException::withMessages(['order_type' => ['Tipe pesanan sudah sama.']]);
+            }
+
+            if ($type === OrderType::DineIn && Setting::dineInFull()) {
+                throw new BusinessException('Restoran sedang penuh, makan di tempat tidak tersedia.', 'DINE_IN_FULL');
+            }
+
+            $order->typeLogs()->create(['old_type' => $order->order_type, 'new_type' => $type]);
+            $order->update(['order_type' => $type, 'qr_token' => Str::random(40)]);
+
+            return $order;
+
+        });
+        
+    }
+
+    public function lookup(?string $qrToken, ?string $code): Order {
+        $order = $this->findForScan($qrToken, $code, false);
+        $this->assertScannable($order);
+
+        return $order;
+    }
+
+    public function scan(?string $qrToken, ?string $code): Order {
+        return DB::transaction(function () use ($qrToken, $code) {
+            $order = $this->findForScan($qrToken, $code, true);
+            $this->assertScannable($order);
+            $order->update(['status' => OrderStatus::Cooking, 'scanned_at' => now()]);
+
+            return $order;
+
+        });
+    }
+
+    public function complete(string $code): Order {
+        return $this->transition($code, OrderStatus::Cooking, OrderStatus::Done, ['done_at' => now()]);
+    }
+
+    public function pickup(string $code): Order {
+        return $this->transition($code, OrderStatus::Done, OrderStatus::PickedUp, ['picked_up_at' => now()]);
+    }
+
+    public function transition(string $code, OrderStatus $from, OrderStatus $to, array $attributes): Order{
+
+        return DB::transaction(function () use ($code, $from, $to, $attributes) {
+            $order = Order::where('code', $code)->lockForUpdate()->firstOrFail();
+
+            if ($order->status !== $from) {
+                throw new BusinessException(
+                    "Pesanan berstatus {$order->status->label()}, tidak bisa diubah ke {$to->label()}.",
+                    'INVALID_STATUS_TRANSITION',
+                );
+            }
+
+            $order->update($attributes + ['status' => $to]);
+
+            return $order;
+        });
+    }
+    
+    public function findFroScan(?string $qrToken, ?string $code, bool $lock): order {
+        $query = $qrToken !== null
+            ? Order::where('qr_token', $qrToken)
+            : Order::where('code', $code);
+
+        if ($lock) {
+            $query->lockForUpdate();
+        }
+
+        if ($qrToken !== null) {
+            return $query->first() ?? throw new BusinessException('QR sudah tidak berlaku atau tidak dikenal.', 'QR_INVALID');
+        }
+
+        return $query->firstOrFail();
+        
+    }
+
+    private function assertScannable(Order $order): void
+    {
+        match ($order->status) {
+            OrderStatus::Paid => null,
+            OrderStatus::PendingPayment => throw new BusinessException('Pesanan belum dibayar.', 'ORDER_UNPAID'),
+            OrderStatus::Expired => throw new BusinessException('Pesanan sudah kedaluwarsa.', 'ORDER_EXPIRED'),
+            default => throw new BusinessException('Pesanan ini sudah pernah di-scan.', 'QR_ALREADY_SCANNED'),
+        };
+    }
+
 
     private function createPayment(Order $order, int $attempt): Payment
     {
