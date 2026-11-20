@@ -289,7 +289,7 @@ class OrderService
         });
     }
     
-    public function findFroScan(?string $qrToken, ?string $code, bool $lock): order {
+    public function findForScan(?string $qrToken, ?string $code, bool $lock): order {
         $query = $qrToken !== null
             ? Order::where('qr_token', $qrToken)
             : Order::where('code', $code);
