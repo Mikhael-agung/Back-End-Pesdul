@@ -1,4 +1,4 @@
-<?php
+<?php // app/Http/Requests/ReportRequest.php
 
 namespace App\Http\Requests;
 
@@ -6,6 +6,17 @@ use Illuminate\Foundation\Http\FormRequest;
 
 class ReportRequest extends FormRequest
 {
-    public function authorize(): bool { return true; }
-    public function rules(): array { return ['from' => ['nullable','date'], 'to' => ['nullable','date','after_or_equal:from']]; }
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'period' => ['required', 'in:daily,weekly,monthly'],
+            'from' => ['nullable', 'date_format:Y-m-d'],
+            'to' => ['nullable', 'date_format:Y-m-d', 'after_or_equal:from'],
+        ];
+    }
 }

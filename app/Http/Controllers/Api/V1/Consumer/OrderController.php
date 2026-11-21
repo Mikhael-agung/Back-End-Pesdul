@@ -10,6 +10,7 @@ use App\Http\Resources\OrderSummaryResource;
 use App\Services\OrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use App\Http\Requests\ChangeOrderTypeRequest;
 
 class OrderController extends Controller
 {
@@ -56,5 +57,13 @@ class OrderController extends Controller
             ->firstOrFail();
 
         return new OrderResource($order);
+    }
+
+    public function changeType(ChangeOrderTypeRequest $request, OrderService $orders, string $code): OrderResource
+    {
+        $order = $request->user()->orders()->where('code', $code)->firstOrFail();
+        $order = $orders->changeType($order, OrderType::from($request->validated('order_type')));
+
+        return new OrderResource($order->load(self::RELATIONS));
     }
 }

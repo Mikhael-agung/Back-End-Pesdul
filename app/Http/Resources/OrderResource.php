@@ -6,6 +6,7 @@ use App\Enums\OrderStatus;
 use App\Models\Order;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use App\Services\QueueEstimator;
 
 /** @mixin Order */
 class OrderResource extends JsonResource
@@ -28,7 +29,7 @@ class OrderResource extends JsonResource
             ])->values()),
             // QR hanya tampil saat menunggu di-scan. Setelah itu tidak ditampilkan lagi.
             'qr_token' => $this->status === OrderStatus::Paid ? $this->qr_token : null,
-            'estimate_minutes' => null, // diisi QueueEstimator di Part 5
+            'estimate_minutes' => app(QueueEstimator::class)->minutesFor($this->resource),
             'can_change_type' => $this->status === OrderStatus::Paid,
             'type_logs' => $this->whenLoaded('typeLogs', fn () => $this->typeLogs->map(fn ($log) => [
                 'old_type' => $log->old_type->value,
